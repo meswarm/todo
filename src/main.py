@@ -4,14 +4,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.config import ensure_data_dirs, API_HOST, API_PORT
-from src.routers import tasks, subtasks, notes, detail, agenda, search
+from src.routers import tasks, subtasks, notes, detail, agenda, search, stats, recurrences
+from src.scheduler import start_scheduler, stop_scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     ensure_data_dirs()
+    start_scheduler()
     yield
+    stop_scheduler()
 
 
 app = FastAPI(title="日程待办系统", version="0.1.0", lifespan=lifespan)
@@ -23,6 +26,8 @@ app.include_router(subtasks.router)
 app.include_router(notes.router)
 app.include_router(detail.router)
 app.include_router(agenda.router)
+app.include_router(stats.router)
+app.include_router(recurrences.router)
 
 
 @app.get("/health")
