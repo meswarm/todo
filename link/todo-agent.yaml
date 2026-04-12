@@ -1,0 +1,553 @@
+# ═══════════════════════════════════════════════════════════════
+# 日程待办系统 — Link 中间件配置
+# ═══════════════════════════════════════════════════════════════
+
+name: "待办助手"
+
+prompt: |
+  你是一个个人日程待办管理助手。你的任务是帮助用户管理日常任务、日程安排和习惯追踪。
+
+  ## 能力范围
+  - 创建、查看、修改、删除任务
+  - 管理子任务和备注
+  - 设置任务优先级（紧急度、重要性、难度各1-3分）
+  - 设置截止时间和提醒
+  - 管理任务依赖关系
+  - 查看每日/多日日程安排
+  - 搜索历史任务（查找过去的成功案例）
+  - 设置重复任务（每日/每周/每月/自定义间隔）
+  - 查看完成统计和复盘数据
+
+  ## 行为准则
+  - 创建任务时，如果用户没有指定优先级，根据任务内容智能判断
+  - 对于"抢票"、"秒杀"等时间敏感任务，自动设置 timing_mode 为 time_critical
+  - 用户完成任务后，引导用户进行简单复盘（遇到什么困难？实际耗时多久？）
+  - 回复简洁、有条理，善用 emoji 提升可读性
+  - 涉及多个任务时，按优先级排序展示
+
+  ## 分类体系
+  常用分类: 工作、学习、生活、健康、理财、社交、创作
+  用户可自定义分类
+
+  ## 当前上下文
+  今天: {today}
+  今日日程: {today_agenda}
+
+model: qwen-plus
+
+matrix_user: "@todo:localhost"
+matrix_password: "todo_password"
+rooms:
+  - "!todo_room_id"
+
+context:
+  - name: today
+    tool: get_current_time
+    refresh: always
+  - name: today_agenda
+    tool: get_today_agenda
+    refresh: always
+
+skills_dir: "agents/skills/todo"
+
+work_dir: "~/Code/meswarm/todo"
+
+tools:
+
+  # ═════════════════════════════════════
+  # 任务管理
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "create_task"
+    description: "创建新任务。必须提供 title（标题）和 category（分类）。可选参数包括：description（描述）、urgency（紧急度1-3）、importance（重要性1-3）、difficulty（难度1-3）、estimated_minutes（预估分钟）、timing_mode（flexible或time_critical）、deadline（截止时间ISO格式）、scheduled_at（计划时间ISO格式）、tags（标签数组）、depends_on（依赖任务ID数组）"
+    endpoint: "http://localhost:8090/tasks"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      title: "{title}"
+      category: "{category}"
+      description: "{description}"
+      urgency: "{urgency}"
+      importance: "{importance}"
+      difficulty: "{difficulty}"
+      estimated_minutes: "{estimated_minutes}"
+      timing_mode: "{timing_mode}"
+      deadline: "{deadline}"
+      scheduled_at: "{scheduled_at}"
+      tags: "{tags}"
+      depends_on: "{depends_on}"
+    parameters:
+      title:
+        type: string
+        description: "任务标题"
+        required: true
+      category:
+        type: string
+        description: "任务分类（工作/学习/生活/健康/理财/社交/创作）"
+        required: true
+      description:
+        type: string
+        description: "任务详细描述"
+      urgency:
+        type: integer
+        description: "紧急度 1-3（1=不紧急 2=一般 3=紧急）"
+        default: 2
+      importance:
+        type: integer
+        description: "重要性 1-3（1=不重要 2=一般 3=重要）"
+        default: 2
+      difficulty:
+        type: integer
+        description: "难度 1-3（1=简单 2=一般 3=困难）"
+        default: 2
+      estimated_minutes:
+        type: integer
+        description: "预估耗时（分钟）"
+      timing_mode:
+        type: string
+        description: "时间模式"
+        enum: ["flexible", "time_critical"]
+        default: "flexible"
+      deadline:
+        type: string
+        description: "截止时间（ISO 8601格式）"
+      scheduled_at:
+        type: string
+        description: "计划执行时间（ISO 8601格式）"
+      tags:
+        type: array
+        description: "标签列表"
+      depends_on:
+        type: array
+        description: "依赖的任务ID列表"
+
+  - type: api
+    name: "list_tasks"
+    description: "获取任务列表。可按 status（pending/in_progress）、category（分类）、tags（标签，逗号分隔）、is_overdue（是否逾期 true/false）进行筛选"
+    endpoint: "http://localhost:8090/tasks?status={status}&category={category}&tags={tags}&is_overdue={is_overdue}"
+    method: GET
+    parameters:
+      status:
+        type: string
+        description: "任务状态筛选"
+        enum: ["pending", "in_progress"]
+      category:
+        type: string
+        description: "分类筛选"
+      tags:
+        type: string
+        description: "标签筛选（逗号分隔）"
+      is_overdue:
+        type: string
+        description: "是否逾期"
+        enum: ["true", "false"]
+
+  - type: api
+    name: "get_task"
+    description: "获取单个任务的详细信息，包括子任务、备注、提醒等"
+    endpoint: "http://localhost:8090/tasks/{task_id}"
+    method: GET
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+
+  - type: api
+    name: "update_task"
+    description: "修改任务信息（标题、描述、分类、优先级、截止时间等）"
+    endpoint: "http://localhost:8090/tasks/{task_id}"
+    method: PUT
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      title: "{title}"
+      category: "{category}"
+      urgency: "{urgency}"
+      importance: "{importance}"
+      deadline: "{deadline}"
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+      title:
+        type: string
+        description: "新标题"
+      category:
+        type: string
+        description: "新分类"
+      urgency:
+        type: integer
+        description: "新紧急度1-3"
+      importance:
+        type: integer
+        description: "新重要性1-3"
+      deadline:
+        type: string
+        description: "新截止时间"
+
+  - type: api
+    name: "delete_task"
+    description: "永久删除一个任务（不可恢复）。不要轻易使用，建议先确认"
+    endpoint: "http://localhost:8090/tasks/{task_id}"
+    method: DELETE
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+
+  - type: api
+    name: "change_task_status"
+    description: "变更任务状态。状态流转规则：pending → in_progress → completed/abandoned。完成时可附加 actual_minutes（实际耗时）和 summary（完成总结）"
+    endpoint: "http://localhost:8090/tasks/{task_id}/status"
+    method: PATCH
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      status: "{status}"
+      actual_minutes: "{actual_minutes}"
+      summary: "{summary}"
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+      status:
+        type: string
+        description: "目标状态"
+        enum: ["in_progress", "completed", "abandoned"]
+        required: true
+      actual_minutes:
+        type: integer
+        description: "实际耗时（分钟），完成时填写"
+      summary:
+        type: string
+        description: "完成总结或放弃原因"
+
+  # ═════════════════════════════════════
+  # 子任务管理
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "add_subtask"
+    description: "为任务添加子任务"
+    endpoint: "http://localhost:8090/tasks/{task_id}/subtasks"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      title: "{title}"
+    parameters:
+      task_id:
+        type: string
+        description: "父任务ID"
+        required: true
+      title:
+        type: string
+        description: "子任务标题"
+        required: true
+
+  - type: api
+    name: "update_subtask"
+    description: "更新子任务状态（标记为完成等）"
+    endpoint: "http://localhost:8090/tasks/{task_id}/subtasks/{sub_id}"
+    method: PATCH
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      status: "{status}"
+    parameters:
+      task_id:
+        type: string
+        description: "父任务ID"
+        required: true
+      sub_id:
+        type: string
+        description: "子任务ID"
+        required: true
+      status:
+        type: string
+        description: "子任务状态"
+        enum: ["pending", "in_progress", "completed"]
+        required: true
+
+  # ═════════════════════════════════════
+  # 备注管理
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "add_note"
+    description: "为任务添加备注（一两句话的快速记录）"
+    endpoint: "http://localhost:8090/tasks/{task_id}/notes"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      content: "{content}"
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+      content:
+        type: string
+        description: "备注内容"
+        required: true
+
+  - type: api
+    name: "get_notes"
+    description: "获取任务的所有备注"
+    endpoint: "http://localhost:8090/tasks/{task_id}/notes"
+    method: GET
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+
+  # ═════════════════════════════════════
+  # 详情文档管理
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "update_detail_doc"
+    description: "更新任务的详情Markdown文档（用于存放详细步骤、图片路径、链接等较长内容）"
+    endpoint: "http://localhost:8090/tasks/{task_id}/detail"
+    method: PUT
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      content: "{content}"
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+      content:
+        type: string
+        description: "Markdown格式的详情内容"
+        required: true
+
+  - type: api
+    name: "get_detail_doc"
+    description: "获取任务的详情Markdown文档"
+    endpoint: "http://localhost:8090/tasks/{task_id}/detail"
+    method: GET
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+
+  # ═════════════════════════════════════
+  # 日程视图
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "get_today_agenda"
+    description: "获取今日日程（包括待办任务列表、优先级排序、未来7天重要事项预告）"
+    endpoint: "http://localhost:8090/agenda?range=today"
+    method: GET
+
+  - type: api
+    name: "get_agenda"
+    description: "获取指定范围的日程。range可以是today、7d、30d，也可以用from和to指定自定义日期范围"
+    endpoint: "http://localhost:8090/agenda?range={range}&from={from_date}&to={to_date}"
+    method: GET
+    parameters:
+      range:
+        type: string
+        description: "范围（today/7d/30d）"
+        default: "today"
+      from_date:
+        type: string
+        description: "起始日期（YYYY-MM-DD）"
+      to_date:
+        type: string
+        description: "结束日期（YYYY-MM-DD）"
+
+  # ═════════════════════════════════════
+  # 搜索
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "search_tasks"
+    description: "按关键词搜索任务（搜索标题、描述、备注、标签）。可指定scope=active只搜活跃任务，scope=history只搜历史，scope=all搜索全部"
+    endpoint: "http://localhost:8090/tasks/search?q={query}&scope={scope}"
+    method: GET
+    parameters:
+      query:
+        type: string
+        description: "搜索关键词"
+        required: true
+      scope:
+        type: string
+        description: "搜索范围"
+        enum: ["all", "active", "history"]
+        default: "all"
+
+  # ═════════════════════════════════════
+  # 重复任务
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "create_recurrence"
+    description: "创建重复任务规则。pattern可以是daily（每日）、weekly（每周，需指定week_days）、monthly（每月，需指定month_day）、interval（间隔天数，需指定interval_days）"
+    endpoint: "http://localhost:8090/recurrences"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_template:
+      title: "{title}"
+      pattern: "{pattern}"
+      interval_days: "{interval_days}"
+      week_days: "{week_days}"
+      month_day: "{month_day}"
+      time_of_day: "{time_of_day}"
+      start_date: "{start_date}"
+      end_date: "{end_date}"
+      task_template:
+        title: "{task_title}"
+        category: "{task_category}"
+        urgency: "{task_urgency}"
+        importance: "{task_importance}"
+    parameters:
+      title:
+        type: string
+        description: "重复规则名称"
+        required: true
+      pattern:
+        type: string
+        description: "重复模式"
+        enum: ["daily", "weekly", "monthly", "interval"]
+        required: true
+      task_title:
+        type: string
+        description: "生成的任务标题"
+        required: true
+      task_category:
+        type: string
+        description: "生成的任务分类"
+        required: true
+      interval_days:
+        type: integer
+        description: "间隔天数（interval模式必填）"
+      week_days:
+        type: array
+        description: "星期几（weekly模式，1=周一 7=周日）"
+      month_day:
+        type: integer
+        description: "每月几号（monthly模式，1-31）"
+      time_of_day:
+        type: string
+        description: "每天几点生成（HH:MM格式）"
+        default: "09:00"
+      start_date:
+        type: string
+        description: "开始日期（YYYY-MM-DD）"
+        required: true
+      end_date:
+        type: string
+        description: "结束日期（可选）"
+
+  - type: api
+    name: "list_recurrences"
+    description: "查看所有重复任务规则"
+    endpoint: "http://localhost:8090/recurrences"
+    method: GET
+
+  - type: api
+    name: "delete_recurrence"
+    description: "删除重复任务规则"
+    endpoint: "http://localhost:8090/recurrences/{rec_id}"
+    method: DELETE
+    parameters:
+      rec_id:
+        type: string
+        description: "重复规则ID"
+        required: true
+
+  # ═════════════════════════════════════
+  # 统计
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "get_daily_stats"
+    description: "获取当日任务统计（完成数、新增数、逾期数等）"
+    endpoint: "http://localhost:8090/stats/daily"
+    method: GET
+
+  - type: api
+    name: "get_weekly_stats"
+    description: "获取某周的统计快照（完成率、分类分布、平均耗时等）。week格式：2026-W15"
+    endpoint: "http://localhost:8090/stats/weekly?week={week}"
+    method: GET
+    parameters:
+      week:
+        type: string
+        description: "周号（如 2026-W15）"
+        required: true
+
+  - type: api
+    name: "get_monthly_stats"
+    description: "获取某月的统计快照。month格式：2026-04"
+    endpoint: "http://localhost:8090/stats/monthly?month={month}"
+    method: GET
+    parameters:
+      month:
+        type: string
+        description: "月份（如 2026-04）"
+        required: true
+
+  # ═════════════════════════════════════
+  # 提醒和依赖
+  # ═════════════════════════════════════
+
+  - type: api
+    name: "set_reminders"
+    description: "设置任务的提醒规则。支持 before_deadline（截止前N分钟提醒）和 fixed_time（固定时间提醒）两种类型"
+    endpoint: "http://localhost:8090/tasks/{task_id}/reminders"
+    method: PUT
+    headers:
+      Content-Type: "application/json"
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+
+  - type: api
+    name: "set_dependencies"
+    description: "设置任务的依赖关系（该任务依赖哪些任务先完成）"
+    endpoint: "http://localhost:8090/tasks/{task_id}/dependencies"
+    method: PUT
+    headers:
+      Content-Type: "application/json"
+    parameters:
+      task_id:
+        type: string
+        description: "任务ID"
+        required: true
+
+  # ═════════════════════════════════════
+  # 内置工具
+  # ═════════════════════════════════════
+
+  - type: builtin
+    name: "get_current_time"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 八、Webhook 接收 [可选]
+# ═══════════════════════════════════════════════════════════════
+# 待办系统的定时推送会发送到这里
+# Link 中间件接收后会整理内容并推送给用户
+
+webhooks:
+  - path: "/notify"
+    description: "接收待办系统的推送通知（早晨日程、晚间复盘、即时提醒）"
+    handler: "notify_user"
