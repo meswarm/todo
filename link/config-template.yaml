@@ -288,17 +288,17 @@ tools:
 #
 # 工具方推送方式:
 #   # 文本推送
-#   curl -X POST http://localhost:9001/alert \
+#   curl -X POST http://localhost:49271/alert \
 #     -H "Content-Type: application/json" \
 #     -d '{"message": "服务器 CPU 超过 90%"}'
 #
 #   # 文件推送
-#   curl -X POST http://localhost:9001/notify \
+#   curl -X POST http://localhost:49271/notify \
 #     -H "Content-Type: application/json" \
 #     -d '{"type": "file", "path": "/path/to/screenshot.png", "caption": "截图"}'
 
 # webhook:
-#   port: 9001
+#   port: 49271
 #   endpoints:
 #     - path: "/alert"
 #       urgent: true

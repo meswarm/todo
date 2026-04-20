@@ -1,8 +1,57 @@
-__pycache__/
-*.pyc
-.venv/
-data/
+# === OS ===
+.DS_Store
+Desktop.ini
+Thumbs.db
+._*
+
+# === Editor / IDE ===
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# === Environment & secrets ===
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.crt
+credentials.json
+secrets.*
+service-account*.json
+
+# === Logs and temp ===
+*.log
+tmp/
+.tmp/
+.cache/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.python-version
+dist/
+build/
 *.egg-info/
-.lock
-*.lock
+*.egg
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# === Project runtime data (local) ===
+data/
+
+# === Local media cache (e.g. Link / R2 downloads); do not publish ===
+media_cache/

@@ -2,8 +2,25 @@
 from pathlib import Path
 import os
 
+from dotenv import load_dotenv
+
 # 项目根目录
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# 先载入仓库默认（.env.example），再由本地 .env 覆盖（不在代码中写死端口）
+load_dotenv(BASE_DIR / ".env.example")
+load_dotenv(BASE_DIR / ".env", override=True)
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        raise RuntimeError(
+            f"缺少环境变量 {name}。请检查项目根目录的 .env.example 是否存在，"
+            f"并执行 cp .env.example .env 后按需修改。"
+        )
+    return value
+
 
 # 数据目录
 DATA_DIR = Path(os.getenv("TODO_DATA_DIR", str(BASE_DIR / "data")))
@@ -14,12 +31,12 @@ DOCS_DIR = DATA_DIR / "docs"
 FILES_DIR = DATA_DIR / "files"
 STATS_DIR = DATA_DIR / "stats"
 
-# API 服务
-API_HOST = os.getenv("TODO_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("TODO_PORT", "8090"))
+# API 服务（端口仅来自环境变量 / .env.example）
+API_HOST = _require_env("TODO_HOST")
+API_PORT = int(_require_env("TODO_PORT"))
 
-# Webhook 推送目标
-WEBHOOK_URL = os.getenv("TODO_WEBHOOK_URL", "http://localhost:9001/notify")
+# Webhook 推送目标（完整 URL，含主机与端口，由环境配置）
+WEBHOOK_URL = _require_env("TODO_WEBHOOK_URL")
 
 # 推送时间配置
 MORNING_PUSH_HOUR = int(os.getenv("TODO_MORNING_HOUR", "8"))
