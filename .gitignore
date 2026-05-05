@@ -52,6 +52,9 @@ htmlcov/
 
 # === Project runtime data (local) ===
 data/
+db/
+downloads/
+.codex
 
 # === Local media cache (e.g. Link / R2 downloads); do not publish ===
 media_cache/

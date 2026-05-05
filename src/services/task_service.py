@@ -1,66 +1,77 @@
-"""任务业务逻辑"""
-from datetime import datetime
+"""Task service for the simplified task model."""
+from __future__ import annotations
 
-from src.models import (
-    Task, TaskCreate, TaskUpdate, TaskStatus,
-    StatusChange, Completion,
-)
+from datetime import date, datetime
+
+from src.config import HISTORY_FILE, TASKS_FILE
+from src.models import Task, TaskComplete, TaskCreate, TaskUpdate
 from src.storage import JsonStore
-from src.config import TASKS_FILE, HISTORY_FILE
 from src.utils.id_gen import generate_task_id
 
-# 全局 store 实例
 task_store = JsonStore(TASKS_FILE, Task)
 history_store = JsonStore(HISTORY_FILE, Task)
 
 
 def create_task(data: TaskCreate) -> Task:
+    existing_ids = [task.id for task in task_store.load_all() + history_store.load_all()]
     task = Task(
-        id=generate_task_id(),
+        id=generate_task_id(existing_ids),
         **data.model_dump(),
     )
     task_store.add(task)
     return task
 
 
-def get_tasks(
-    status: str | None = None,
-    category: str | None = None,
-    tags: list[str] | None = None,
-    is_overdue: bool | None = None,
-    from_date: str | None = None,
-    to_date: str | None = None,
+def get_task(task_id: str) -> Task | None:
+    task = task_store.find_by_id(task_id)
+    if task:
+        return task
+    return history_store.find_by_id(task_id)
+
+
+def list_tasks(
+    start: date | datetime | None = None,
+    end: date | datetime | None = None,
+    include_recurring: bool = True,
 ) -> list[Task]:
     tasks = task_store.load_all()
-    if status:
-        tasks = [t for t in tasks if t.status == status]
-    if category:
-        tasks = [t for t in tasks if t.category == category]
-    if tags:
-        tasks = [t for t in tasks if any(tag in t.tags for tag in tags)]
-    if is_overdue is not None:
-        tasks = [t for t in tasks if t.is_overdue == is_overdue]
-    if from_date:
-        fd = datetime.fromisoformat(from_date)
-        tasks = [t for t in tasks if t.deadline and t.deadline >= fd]
-    if to_date:
-        td = datetime.fromisoformat(to_date)
-        tasks = [t for t in tasks if t.deadline and t.deadline <= td]
-    return tasks
-
-
-def get_task(task_id: str) -> Task | None:
-    return task_store.find_by_id(task_id)
+    if start:
+        start_dt = (
+            datetime.combine(start, datetime.min.time())
+            if isinstance(start, date) and not isinstance(start, datetime)
+            else start
+        )
+        tasks = [task for task in tasks if task.scheduled_at >= start_dt]
+    if end:
+        end_dt = (
+            datetime.combine(end, datetime.max.time())
+            if isinstance(end, date) and not isinstance(end, datetime)
+            else end
+        )
+        tasks = [task for task in tasks if task.scheduled_at <= end_dt]
+    if not include_recurring:
+        tasks = [task for task in tasks if task.recurrence_id is None]
+    return sorted(tasks, key=lambda task: task.scheduled_at)
 
 
 def update_task(task_id: str, data: TaskUpdate) -> Task | None:
     task = task_store.find_by_id(task_id)
     if not task:
         return None
-    update_data = data.model_dump(exclude_none=True)
-    for key, value in update_data.items():
+
+    for key, value in data.model_dump(exclude_none=True).items():
         setattr(task, key, value)
-    task.updated_at = datetime.now()
+    task_store.update(task_id, task)
+    return task
+
+
+def complete_task(task_id: str, data: TaskComplete) -> Task | None:
+    task = task_store.find_by_id(task_id)
+    if not task:
+        return None
+
+    task.completed_at = data.completed_at or datetime.now()
+    task.completion_summary = data.completion_summary
     task_store.update(task_id, task)
     return task
 
@@ -69,32 +80,21 @@ def delete_task(task_id: str) -> bool:
     return task_store.delete(task_id)
 
 
-def change_status(task_id: str, data: StatusChange) -> Task | None:
-    task = task_store.find_by_id(task_id)
-    if not task:
-        return None
-    # 状态流转校验
-    valid_transitions = {
-        TaskStatus.PENDING: [TaskStatus.IN_PROGRESS, TaskStatus.ABANDONED],
-        TaskStatus.IN_PROGRESS: [TaskStatus.COMPLETED, TaskStatus.ABANDONED],
-    }
-    allowed = valid_transitions.get(task.status, [])
-    if data.status not in allowed:
-        raise ValueError(
-            f"Cannot change from {task.status} to {data.status}"
-        )
-    task.status = data.status
-    task.updated_at = datetime.now()
+def archive_before(cutoff: datetime) -> int:
+    tasks = task_store.load_all()
+    moved = 0
+    remaining: list[Task] = []
+    archived: list[Task] = []
 
-    if data.status in (TaskStatus.COMPLETED, TaskStatus.ABANDONED):
-        task.completion = Completion(
-            completed_at=datetime.now(),
-            actual_minutes=data.actual_minutes,
-            summary=data.summary,
-        )
-        # 迁移到历史
-        task_store.update(task_id, task)
-        task_store.move_to(task_id, history_store)
-    else:
-        task_store.update(task_id, task)
-    return task
+    for task in tasks:
+        if task.scheduled_at < cutoff:
+            archived.append(task)
+            moved += 1
+        else:
+            remaining.append(task)
+
+    if moved:
+        task_store.save_all(remaining)
+        history = history_store.load_all()
+        history_store.save_all(history + archived)
+    return moved

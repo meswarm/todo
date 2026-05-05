@@ -1,8 +1,10 @@
-"""测试 JSON 存储层"""
+"""Tests for JSON storage."""
+from datetime import datetime
+
 import pytest
-from pathlib import Path
+
+from src.models.task import Task
 from src.storage.json_store import JsonStore
-from src.models.task import Task, TaskStatus
 
 
 @pytest.fixture
@@ -14,7 +16,11 @@ def tmp_store(tmp_path):
 
 @pytest.fixture
 def sample_task():
-    return Task(id="task_test_001", title="测试", category="工作")
+    return Task(
+        id="task_test_001",
+        title="测试",
+        scheduled_at=datetime(2026, 4, 28, 10, 30),
+    )
 
 
 def test_add_and_load(tmp_store, sample_task):

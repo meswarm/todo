@@ -1,18 +1,25 @@
 """ID 生成器"""
 from datetime import datetime
 import threading
+import re
 
 _counter_lock = threading.Lock()
 _daily_counters: dict[str, int] = {}
+_SHORT_TASK_ID_RE = re.compile(r"^(\d{6})(\d{2,})$")
 
 
-def generate_task_id() -> str:
-    """生成格式为 task_YYYYMMDD_NNN 的唯一 ID"""
-    today = datetime.now().strftime("%Y%m%d")
+def generate_task_id(existing_ids: list[str] | None = None) -> str:
+    """生成格式为 YYMMDDNN 的短任务 ID，例如 26042701。"""
+    today = datetime.now().strftime("%y%m%d")
     with _counter_lock:
+        if existing_ids:
+            _daily_counters[today] = max(
+                _daily_counters.get(today, 0),
+                _max_existing_task_number(today, existing_ids),
+            )
         _daily_counters.setdefault(today, 0)
         _daily_counters[today] += 1
-        return f"task_{today}_{_daily_counters[today]:03d}"
+        return f"{today}{_daily_counters[today]:02d}"
 
 
 def generate_sub_id(existing_ids: list[str]) -> str:
@@ -41,6 +48,11 @@ def generate_recurrence_id() -> str:
 def init_counters_from_existing(task_ids: list[str]):
     """从已有任务 ID 初始化计数器（启动时调用，避免 ID 冲突）"""
     with _counter_lock:
+        today = datetime.now().strftime("%y%m%d")
+        _daily_counters[today] = max(
+            _daily_counters.get(today, 0),
+            _max_existing_task_number(today, task_ids),
+        )
         for tid in task_ids:
             parts = tid.split("_")
             if len(parts) >= 3 and parts[0] == "task":
@@ -52,3 +64,12 @@ def init_counters_from_existing(task_ids: list[str]):
                     )
                 except ValueError:
                     pass
+
+
+def _max_existing_task_number(today: str, task_ids: list[str]) -> int:
+    max_n = 0
+    for tid in task_ids:
+        match = _SHORT_TASK_ID_RE.match(tid)
+        if match and match.group(1) == today:
+            max_n = max(max_n, int(match.group(2)))
+    return max_n
