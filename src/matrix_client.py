@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from nio import AsyncClient
 
@@ -61,11 +61,11 @@ class MatrixEvent:
         return self.content
 
 
-Callback = Callable[[str, MatrixEvent], Awaitable[None] | None]
-LegacyCallback = Callable[[str, str, str], Awaitable[None] | None]
+Callback = Callable[[str, MatrixEvent], Optional[Awaitable[None]]]
+LegacyCallback = Callable[[str, str, str], Optional[Awaitable[None]]]
 MatrixCallback = Callable[
     [str, str, str, list[MatrixAttachment]],
-    Awaitable[None] | None,
+    Optional[Awaitable[None]],
 ]
 
 
@@ -151,10 +151,17 @@ class MatrixClient:
         await self._client.close()
         self._client = None
 
-    async def send_text(self, room_id: str, text: str) -> None:
+    async def send_text(
+        self,
+        room_id: str,
+        text: str,
+        content_extra: dict[str, Any] | None = None,
+    ) -> None:
         if not text or self._client is None:
             return
         content = {"msgtype": "m.text", "body": text}
+        if content_extra:
+            content.update(content_extra)
         send_calls = [
             lambda: self._client.room_send(
                 room_id=room_id,

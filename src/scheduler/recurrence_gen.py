@@ -5,7 +5,7 @@ import logging
 from datetime import date, datetime, time
 
 from src.config import RECURRENCES_FILE
-from src.models import Recurrence, RecurrenceCreate, RecurrencePattern, Task, TaskCreate
+from src.models import Recurrence, RecurrenceCreate, RecurrencePattern, RecurrenceUpdate, Task, TaskCreate, TimeKind
 from src.services import task_service
 from src.services.business_day import BUSINESS_DAY_START_HOUR, business_date, business_day_range
 from src.storage import JsonStore
@@ -17,6 +17,8 @@ recurrence_store = JsonStore(RECURRENCES_FILE, Recurrence)
 
 def should_generate(rec: Recurrence, day: date) -> bool:
     if not rec.enabled:
+        return False
+    if day in rec.skipped_dates:
         return False
     if day < rec.start_date:
         return False
@@ -51,6 +53,41 @@ def list_recurrences(enabled_only: bool = False) -> list[Recurrence]:
     return recurrences
 
 
+def delete_recurrence(recurrence_id: str) -> bool:
+    return recurrence_store.delete(recurrence_id)
+
+
+def skip_recurrence_occurrence(recurrence_id: str, day: date) -> bool:
+    recurrence = recurrence_store.find_by_id(recurrence_id)
+    if not recurrence:
+        return False
+    if day not in recurrence.skipped_dates:
+        recurrence.skipped_dates.append(day)
+        recurrence.skipped_dates.sort()
+        recurrence_store.update(recurrence_id, recurrence)
+    return True
+
+
+def update_recurrence(recurrence_id: str, payload: RecurrenceUpdate) -> Recurrence | None:
+    recurrence = recurrence_store.find_by_id(recurrence_id)
+    if not recurrence:
+        return None
+
+    updates = payload.model_dump(exclude_none=True)
+    template_title = updates.pop("template_title", None)
+    detail = updates.pop("detail", None)
+
+    for key, value in updates.items():
+        setattr(recurrence, key, value)
+    if template_title is not None:
+        recurrence.template.title = template_title
+    if detail is not None:
+        recurrence.template.detail = detail
+
+    recurrence_store.update(recurrence_id, recurrence)
+    return recurrence
+
+
 def _scheduled_for(day: date, time_of_day: str) -> datetime:
     hour, minute = map(int, time_of_day.split(":"))
     return datetime.combine(day, time(hour=hour, minute=minute))
@@ -80,6 +117,8 @@ def generate_recurring_tasks(day: date | None = None) -> list[Task]:
                 scheduled_at=scheduled_at,
                 detail=template.detail,
                 recurrence_id=rec.id,
+                time_kind=TimeKind.SLOT if rec.time_slot else TimeKind.EXACT,
+                time_slot=rec.time_slot,
             )
         )
         generated.append(task)

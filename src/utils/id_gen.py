@@ -1,4 +1,6 @@
 """ID 生成器"""
+from __future__ import annotations
+
 from datetime import datetime
 import threading
 import re

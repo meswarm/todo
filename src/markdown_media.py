@@ -89,3 +89,25 @@ def parse_embedded_media(text: str) -> list[EmbeddedMedia]:
         found.append((match.start(), _build_entry(raw_url, _extract_filename(raw_url))))
 
     return [media for _, media in sorted(found, key=lambda pair: pair[0])]
+
+
+def extract_embedded_media_references(text: str) -> list[str]:
+    """Extract original R2 media references in display order."""
+
+    found: list[tuple[int, str]] = []
+    occupied: list[tuple[int, int]] = []
+
+    for match in _IMAGE_LINK_RE.finditer(text):
+        found.append((match.start(), match.group(0)))
+        occupied.append(match.span(0))
+
+    for match in _LINK_RE.finditer(text):
+        found.append((match.start(), match.group(0)))
+        occupied.append(match.span(0))
+
+    for match in _BARE_RE.finditer(text):
+        if any(span[0] < match.end() and match.start() < span[1] for span in occupied):
+            continue
+        found.append((match.start(), _clean_bare_url(match.group(0))))
+
+    return [reference for _, reference in sorted(found, key=lambda pair: pair[0])]

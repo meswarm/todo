@@ -2,23 +2,26 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from typing import Any
 
+from src.config import SLOT_REMINDER_TIMES
 from src.models import (
     Recurrence,
     RecurrenceCreate,
     RecurrencePattern,
     RecurrenceTemplate,
+    RecurrenceUpdate,
     Task,
-    TaskComplete,
     TaskCreate,
     TaskUpdate,
+    TimeKind,
+    TimeSlot,
 )
 from src.context import _format_tasks
-from src.scheduler.recurrence_gen import create_recurrence, list_recurrences
+from src.scheduler.recurrence_gen import create_recurrence, delete_recurrence, list_recurrences, skip_recurrence_occurrence, update_recurrence
 from src.services import task_service
-from src.services.agenda_service import get_tasks_in_range, sort_tasks_for_agenda
+from src.services.agenda_service import get_tasks_on_day, sort_tasks_for_agenda
 from src.services.business_day import business_date
 from src.tools.base import ToolDefinition
 from src.tools.builtin import BuiltinTool
@@ -38,7 +41,6 @@ def _match_task(task: Task, query: str) -> bool:
         [
             task.title,
             task.detail or "",
-            task.completion_summary or "",
         ]
     ).lower()
     return normalized in haystack
@@ -94,8 +96,30 @@ def _normalize_datetime_fields(args: dict[str, Any], *field_names: str) -> dict[
     return normalized
 
 
+def _normalize_task_time_args(args: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_datetime_fields(args, "scheduled_at")
+    if normalized.get("time_kind") != TimeKind.SLOT.value:
+        return normalized
+    slot = normalized.get("time_slot")
+    scheduled_at = normalized.get("scheduled_at")
+    if slot in SLOT_REMINDER_TIMES and isinstance(scheduled_at, datetime):
+        normalized["scheduled_at"] = datetime.combine(
+            scheduled_at.date(),
+            SLOT_REMINDER_TIMES[slot],
+        )
+    return normalized
+
+
+def _time_of_day_from_slot(slot: str | None) -> str | None:
+    if slot not in SLOT_REMINDER_TIMES:
+        return None
+    return SLOT_REMINDER_TIMES[slot].strftime("%H:%M")
+
+
 def _recurrence_occurs_on(recurrence: Recurrence, day: date) -> bool:
     if not recurrence.enabled:
+        return False
+    if day in recurrence.skipped_dates:
         return False
     if day < recurrence.start_date:
         return False
@@ -113,7 +137,7 @@ def _recurrence_occurs_on(recurrence: Recurrence, day: date) -> bool:
     return False
 
 
-def _project_recurring_tasks(start: date, end: date, existing_tasks: list[Task]) -> list[Task]:
+def _project_recurring_tasks_for_day(day: date, existing_tasks: list[Task]) -> list[Task]:
     existing_pairs = {
         (task.recurrence_id, business_date(task.scheduled_at))
         for task in existing_tasks
@@ -121,96 +145,57 @@ def _project_recurring_tasks(start: date, end: date, existing_tasks: list[Task])
     }
     projected: list[Task] = []
     recurrences = list_recurrences(enabled_only=True)
-    day = start
-    while day <= end:
-        for recurrence in recurrences:
-            pair = (recurrence.id, day)
-            if pair in existing_pairs or not _recurrence_occurs_on(recurrence, day):
-                continue
-            hour, minute = map(int, recurrence.time_of_day.split(":"))
-            template = recurrence.template
-            projected.append(
-                Task(
-                    id="",
-                    title=template.title,
-                    scheduled_at=datetime.combine(day, time(hour=hour, minute=minute)),
-                    detail=template.detail,
-                    recurrence_id=recurrence.id,
-                )
+    for recurrence in recurrences:
+        pair = (recurrence.id, day)
+        if pair in existing_pairs or not _recurrence_occurs_on(recurrence, day):
+            continue
+        hour, minute = map(int, recurrence.time_of_day.split(":"))
+        template = recurrence.template
+        projected.append(
+            Task(
+                id="",
+                title=template.title,
+                scheduled_at=datetime.combine(day, time(hour=hour, minute=minute)),
+                detail=template.detail,
+                recurrence_id=recurrence.id,
             )
-        day += timedelta(days=1)
+        )
     return projected
 
 
-def _build_agenda(
-    range_name: str | None = None,
-    from_date: str | None = None,
-    to_date: str | None = None,
-) -> dict[str, Any]:
+def build_day_agenda(day: date | None = None) -> dict[str, Any]:
     all_tasks = task_service.task_store.load_all()
-    today = business_date()
-
-    if from_date and to_date:
-        start = _parse_date(from_date)
-        end = _parse_date(to_date)
-    elif range_name == "today":
-        start = end = today
-    elif range_name == "tomorrow":
-        start = end = today + timedelta(days=1)
-    elif range_name and range_name.endswith("d"):
-        start = today
-        end = today + timedelta(days=int(range_name[:-1]))
-    else:
-        start = end = today
-
-    range_tasks = get_tasks_in_range(all_tasks, start, end)
+    target_day = day or business_date()
+    day_tasks = get_tasks_on_day(all_tasks, target_day)
     tasks = sort_tasks_for_agenda(
-        range_tasks + _project_recurring_tasks(start, end, all_tasks)
+        day_tasks + _project_recurring_tasks_for_day(target_day, all_tasks)
     )
     return {
-        "range": {"start": start.isoformat(), "end": end.isoformat()},
+        "day": target_day.isoformat(),
         "tasks": [_task_to_dict(task) for task in tasks],
         "summary": {"total": len(tasks)},
     }
 
 
-def _current_business_day_tasks_markdown() -> str:
-    today = business_date()
-    tasks = sort_tasks_for_agenda(
-        get_tasks_in_range(task_service.task_store.load_all(), today, today)
-    )
-    return _format_tasks(tasks)
-
-
-def _with_current_business_day_table(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **payload,
-        "current_business_day_tasks_markdown": _current_business_day_tasks_markdown(),
-    }
+def _single_task_markdown(task: Task) -> str:
+    return _format_tasks([task])
 
 
 def build_todo_tools() -> list[BuiltinTool]:
     async def create_task_tool(args: dict[str, Any]) -> dict[str, Any]:
         task = task_service.create_task(
-            TaskCreate(**_normalize_datetime_fields(args, "scheduled_at"))
+            TaskCreate(**_normalize_task_time_args(args))
         )
-        return _with_current_business_day_table(_task_to_dict(task))
+        return {
+            **_task_to_dict(task),
+            "task_markdown": _single_task_markdown(task),
+        }
 
     async def get_task(args: dict[str, Any]) -> dict[str, Any]:
         task = task_service.get_task(args["task_id"])
         if not task:
             return {"error": "Task not found"}
         return _task_to_dict(task)
-
-    async def list_tasks_tool(args: dict[str, Any]) -> list[dict[str, Any]]:
-        start = _parse_date(args["from_date"]) if args.get("from_date") else None
-        end = _parse_date(args["to_date"]) if args.get("to_date") else None
-        tasks = task_service.list_tasks(
-            start=start,
-            end=end,
-            include_recurring=args.get("include_recurring", True),
-        )
-        return [_task_to_dict(task) for task in sort_tasks_for_agenda(tasks)]
 
     async def search_tasks_tool(args: dict[str, Any]) -> dict[str, Any]:
         query = args["query"]
@@ -236,42 +221,37 @@ def build_todo_tools() -> list[BuiltinTool]:
     async def update_task_tool(args: dict[str, Any]) -> dict[str, Any]:
         task = task_service.update_task(
             args["task_id"],
-            TaskUpdate(**_normalize_datetime_fields(args, "scheduled_at", "completed_at")),
+            TaskUpdate(**_normalize_task_time_args(args)),
         )
         if not task:
             return {"error": "Task not found"}
-        return _with_current_business_day_table(_task_to_dict(task))
-
-    async def complete_task_tool(args: dict[str, Any]) -> dict[str, Any]:
-        task = task_service.complete_task(
-            args["task_id"],
-            TaskComplete(**_normalize_datetime_fields(args, "completed_at")),
-        )
-        if not task:
-            return {"error": "Task not found"}
-        return _with_current_business_day_table(_task_to_dict(task))
+        return {
+            **_task_to_dict(task),
+            "task_markdown": _single_task_markdown(task),
+        }
 
     async def delete_task_tool(args: dict[str, Any]) -> dict[str, Any]:
+        task = task_service.get_task(args["task_id"])
         deleted = task_service.delete_task(args["task_id"])
-        return _with_current_business_day_table(
-            {"deleted": deleted, "task_id": args["task_id"]}
-        )
-
-    async def get_agenda_tool(args: dict[str, Any]) -> dict[str, Any]:
-        return _build_agenda(
-            range_name=args.get("range"),
-            from_date=args.get("from"),
-            to_date=args.get("to"),
-        )
+        if deleted and task and task.recurrence_id:
+            skip_recurrence_occurrence(task.recurrence_id, business_date(task.scheduled_at))
+        task_id = args["task_id"]
+        return {
+            "deleted": deleted,
+            "task_id": task_id,
+            "message": f"已删除任务 `{task_id}`" if deleted else f"未找到任务 `{task_id}`",
+        }
 
     async def create_recurrence_tool(args: dict[str, Any]) -> dict[str, Any]:
+        time_of_day = args.get("time_of_day") or _time_of_day_from_slot(args.get("time_slot"))
         payload = RecurrenceCreate(
             title=args["title"],
             pattern=args["pattern"],
             interval_days=args.get("interval_days"),
             week_days=args.get("week_days"),
             month_day=args.get("month_day"),
-            time_of_day=args["time_of_day"],
+            time_of_day=time_of_day or "09:00",
+            time_slot=TimeSlot(args["time_slot"]) if args.get("time_slot") else None,
             start_date=_parse_date(args["start_date"]),
             end_date=_parse_date(args["end_date"]) if args.get("end_date") else None,
             template=RecurrenceTemplate(
@@ -280,6 +260,31 @@ def build_todo_tools() -> list[BuiltinTool]:
             ),
         )
         recurrence = create_recurrence(payload)
+        return recurrence.model_dump(mode="json")
+
+    async def update_recurrence_tool(args: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(args)
+        slot_time = _time_of_day_from_slot(normalized.get("time_slot"))
+        if slot_time:
+            normalized["time_of_day"] = slot_time
+        time_slot = TimeSlot(normalized["time_slot"]) if normalized.get("time_slot") else None
+        payload = RecurrenceUpdate(
+            title=normalized.get("title"),
+            template_title=normalized.get("template_title"),
+            detail=normalized.get("detail"),
+            pattern=normalized.get("pattern"),
+            interval_days=normalized.get("interval_days"),
+            week_days=normalized.get("week_days"),
+            month_day=normalized.get("month_day"),
+            time_of_day=normalized.get("time_of_day"),
+            time_slot=time_slot,
+            start_date=_parse_date(normalized["start_date"]) if normalized.get("start_date") else None,
+            end_date=_parse_date(normalized["end_date"]) if normalized.get("end_date") else None,
+            enabled=normalized.get("enabled"),
+        )
+        recurrence = update_recurrence(normalized["recurrence_id"], payload)
+        if not recurrence:
+            return {"error": "Recurrence not found"}
         return recurrence.model_dump(mode="json")
 
     async def list_recurrences_tool(args: dict[str, Any]) -> list[dict[str, Any]]:
@@ -296,6 +301,11 @@ def build_todo_tools() -> list[BuiltinTool]:
                         "title": {"type": "string", "maxLength": 10},
                         "scheduled_at": {"type": "string"},
                         "detail": {"type": "string"},
+                        "time_kind": {"type": "string", "enum": ["exact", "slot"]},
+                        "time_slot": {
+                            "type": "string",
+                            "enum": ["morning", "afternoon", "evening"],
+                        },
                     },
                     ["title", "scheduled_at"],
                 ),
@@ -309,21 +319,6 @@ def build_todo_tools() -> list[BuiltinTool]:
                 parameters=_schema({"task_id": {"type": "string"}}, ["task_id"]),
             ),
             get_task,
-        ),
-        BuiltinTool(
-            ToolDefinition(
-                name="list_tasks",
-                description="List tasks by date range.",
-                parameters=_schema(
-                    {
-                        "from_date": {"type": "string"},
-                        "to_date": {"type": "string"},
-                        "include_recurring": {"type": "boolean"},
-                    },
-                    [],
-                ),
-            ),
-            list_tasks_tool,
         ),
         BuiltinTool(
             ToolDefinition(
@@ -342,13 +337,18 @@ def build_todo_tools() -> list[BuiltinTool]:
         BuiltinTool(
             ToolDefinition(
                 name="update_task",
-                description="Update task fields before completion.",
+                description="Update task fields.",
                 parameters=_schema(
                     {
                         "task_id": {"type": "string"},
                         "title": {"type": "string", "maxLength": 10},
                         "scheduled_at": {"type": "string"},
                         "detail": {"type": "string"},
+                        "time_kind": {"type": "string", "enum": ["exact", "slot"]},
+                        "time_slot": {
+                            "type": "string",
+                            "enum": ["morning", "afternoon", "evening"],
+                        },
                     },
                     ["task_id"],
                 ),
@@ -357,44 +357,11 @@ def build_todo_tools() -> list[BuiltinTool]:
         ),
         BuiltinTool(
             ToolDefinition(
-                name="complete_task",
-                description="Mark a task as completed and save completion notes.",
-                parameters=_schema(
-                    {
-                        "task_id": {"type": "string"},
-                        "completion_summary": {"type": "string"},
-                        "completed_at": {"type": "string"},
-                    },
-                    ["task_id"],
-                ),
-            ),
-            complete_task_tool,
-        ),
-        BuiltinTool(
-            ToolDefinition(
                 name="delete_task",
                 description="Delete a task by id.",
                 parameters=_schema({"task_id": {"type": "string"}}, ["task_id"]),
             ),
             delete_task_tool,
-        ),
-        BuiltinTool(
-            ToolDefinition(
-                name="get_agenda",
-                description=(
-                    "Get tasks and projected recurring occurrences for today, "
-                    "tomorrow, or a custom date range."
-                ),
-                parameters=_schema(
-                    {
-                        "range": {"type": "string"},
-                        "from": {"type": "string"},
-                        "to": {"type": "string"},
-                    },
-                    [],
-                ),
-            ),
-            get_agenda_tool,
         ),
         BuiltinTool(
             ToolDefinition(
@@ -413,6 +380,10 @@ def build_todo_tools() -> list[BuiltinTool]:
                         "week_days": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 7}},
                         "month_day": {"type": "integer", "minimum": 1, "maximum": 31},
                         "time_of_day": {"type": "string"},
+                        "time_slot": {
+                            "type": "string",
+                            "enum": ["morning", "afternoon", "evening"],
+                        },
                         "start_date": {"type": "string"},
                         "end_date": {"type": "string"},
                     },
@@ -420,6 +391,37 @@ def build_todo_tools() -> list[BuiltinTool]:
                 ),
             ),
             create_recurrence_tool,
+        ),
+        BuiltinTool(
+            ToolDefinition(
+                name="update_recurrence",
+                description="Update a recurring rule by id. Already generated task instances are not changed.",
+                parameters=_schema(
+                    {
+                        "recurrence_id": {"type": "string"},
+                        "title": {"type": "string", "maxLength": 10},
+                        "template_title": {"type": "string", "maxLength": 10},
+                        "detail": {"type": "string"},
+                        "pattern": {
+                            "type": "string",
+                            "enum": [pattern.value for pattern in RecurrencePattern],
+                        },
+                        "interval_days": {"type": "integer", "minimum": 1},
+                        "week_days": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 7}},
+                        "month_day": {"type": "integer", "minimum": 1, "maximum": 31},
+                        "time_of_day": {"type": "string"},
+                        "time_slot": {
+                            "type": "string",
+                            "enum": ["morning", "afternoon", "evening"],
+                        },
+                        "start_date": {"type": "string"},
+                        "end_date": {"type": "string"},
+                        "enabled": {"type": "boolean"},
+                    },
+                    ["recurrence_id"],
+                ),
+            ),
+            update_recurrence_tool,
         ),
         BuiltinTool(
             ToolDefinition(

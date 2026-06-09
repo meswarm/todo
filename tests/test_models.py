@@ -4,7 +4,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from src.models.task import TaskCreate
+from src.models.task import Task, TaskCreate, TimeKind, TimeSlot
 from src.utils.id_gen import generate_sub_id, generate_task_id
 
 
@@ -19,8 +19,55 @@ def test_task_create_uses_minimal_task_fields():
     assert "status" not in dumped
     assert "difficulty" not in dumped
     assert "time_mode" not in dumped
-    assert task.completion_summary == ""
+    assert "completion_summary" not in dumped
+    assert "completed_at" not in dumped
     assert task.recurrence_id is None
+    assert task.time_kind == TimeKind.EXACT
+    assert task.time_slot is None
+
+
+def test_legacy_task_defaults_to_exact_time():
+    task = Task(
+        id="26053101",
+        title="写总结",
+        scheduled_at=datetime(2026, 5, 31, 10, 30),
+    )
+
+    assert task.time_kind == TimeKind.EXACT
+    assert task.time_slot is None
+
+
+def test_slot_task_requires_time_slot():
+    with pytest.raises(ValidationError):
+        TaskCreate(
+            title="买菜",
+            scheduled_at=datetime(2026, 5, 31, 14, 0),
+            time_kind=TimeKind.SLOT,
+        )
+
+
+def test_exact_task_clears_time_slot():
+    task = TaskCreate(
+        title="开会",
+        scheduled_at=datetime(2026, 5, 31, 17, 0),
+        time_kind=TimeKind.EXACT,
+        time_slot=TimeSlot.AFTERNOON,
+    )
+
+    assert task.time_kind == TimeKind.EXACT
+    assert task.time_slot is None
+
+
+def test_slot_task_accepts_valid_time_slot():
+    task = TaskCreate(
+        title="买菜",
+        scheduled_at=datetime(2026, 5, 31, 14, 0),
+        time_kind=TimeKind.SLOT,
+        time_slot=TimeSlot.AFTERNOON,
+    )
+
+    assert task.time_kind == TimeKind.SLOT
+    assert task.time_slot == TimeSlot.AFTERNOON
 
 
 def test_task_title_is_short():

@@ -1,4 +1,4 @@
-"""Morning report payloads for the current business day."""
+"""Noon report payloads for the current business day."""
 from __future__ import annotations
 
 import logging
@@ -12,15 +12,16 @@ from src.services.notification import publish_notification
 logger = logging.getLogger(__name__)
 
 
-def morning_push(now: datetime | None = None) -> None:
+def noon_push(now: datetime | None = None) -> None:
     current = now or datetime.now()
     today = business_date(current)
-    all_tasks = task_service.task_store.load_all()
-    today_tasks = sort_tasks_for_agenda(get_tasks_on_day(all_tasks, today))
+    today_tasks = sort_tasks_for_agenda(
+        get_tasks_on_day(task_service.task_store.load_all(), today),
+    )
 
     publish_notification(
         {
-            "type": "morning_agenda",
+            "type": "noon_agenda",
             "timestamp": current.isoformat(),
             "data": {
                 "business_day": today.isoformat(),
@@ -28,4 +29,4 @@ def morning_push(now: datetime | None = None) -> None:
             },
         }
     )
-    logger.info("Morning report completed")
+    logger.info("Noon report completed")

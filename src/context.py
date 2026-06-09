@@ -7,10 +7,10 @@ import re
 from string import Formatter
 
 from src.config import CONTEXT_CELL_MAX_CHARS
-from src.models import Recurrence, RecurrencePattern, Task
+from src.models import Recurrence, RecurrencePattern, Task, TimeKind, TimeSlot
 from src.scheduler.recurrence_gen import recurrence_store
 from src.services import task_service
-from src.services.agenda_service import get_tasks_in_range, sort_tasks_for_agenda
+from src.services.agenda_service import get_tasks_on_day, sort_tasks_for_agenda
 from src.services.business_day import business_date
 
 MAX_CONTEXT_TASKS = 24
@@ -24,6 +24,11 @@ WEEKDAY_NAMES = {
     5: "周五",
     6: "周六",
     7: "周日",
+}
+TIME_SLOT_LABELS = {
+    TimeSlot.MORNING: "上午",
+    TimeSlot.AFTERNOON: "下午",
+    TimeSlot.EVENING: "晚上",
 }
 
 
@@ -71,7 +76,7 @@ def build_runtime_context(now: datetime | None = None) -> RuntimeContext:
     today = business_date(current)
     all_tasks = task_service.task_store.load_all()
     recurrences = recurrence_store.load_all()
-    today_tasks = sort_tasks_for_agenda(get_tasks_in_range(all_tasks, today, today))
+    today_tasks = sort_tasks_for_agenda(get_tasks_on_day(all_tasks, today))
     future_tasks = sort_tasks_for_agenda(
         [
             task
@@ -83,7 +88,7 @@ def build_runtime_context(now: datetime | None = None) -> RuntimeContext:
         [
             task
             for task in all_tasks
-            if task.completed_at is None and task.scheduled_at < current
+            if task.scheduled_at < current
         ]
     )
     return RuntimeContext(
@@ -102,8 +107,8 @@ def _format_tasks(tasks: list[Task]) -> str:
 
     visible_tasks = tasks[:MAX_CONTEXT_TASKS]
     lines = [
-        "| ID | 标题 | 开始时间 | 详情 | 完成总结 |",
-        "|---|---|---|---|---|",
+        "| ID | 标题 | 开始时间 | 详情 |",
+        "|---|---|---|---|",
     ]
     for task in visible_tasks:
         detail = _cell(task.detail)
@@ -115,9 +120,8 @@ def _format_tasks(tasks: list[Task]) -> str:
                 [
                     _cell(task.id),
                     _cell(task.title),
-                    _time_label(task.scheduled_at),
+                    task_time_cell(task),
                     detail,
-                    _cell(task.completion_summary),
                 ]
             )
             + " |"
@@ -129,8 +133,29 @@ def _format_tasks(tasks: list[Task]) -> str:
     return "\n".join(lines)
 
 
-def _time_label(value: datetime) -> str:
-    return value.strftime("%m-%d %H:%M")
+def task_time_cell(task: Task) -> str:
+    if task.completed:
+        return "✅"
+    return format_task_time_label(task.scheduled_at, task.time_kind, task.time_slot)
+
+
+def format_task_time_label(
+    value: datetime,
+    time_kind: TimeKind | str | None = TimeKind.EXACT,
+    time_slot: TimeSlot | str | None = None,
+) -> str:
+    kind = TimeKind(time_kind or TimeKind.EXACT)
+    slot = TimeSlot(time_slot) if time_slot else None
+    date_part = _date_label(value)
+    if kind == TimeKind.SLOT and slot:
+        return f"{date_part} {TIME_SLOT_LABELS[slot]}"
+    return f"{date_part} {value:%H:%M}"
+
+
+def _date_label(value: datetime) -> str:
+    if value.year != datetime.now().year:
+        return value.strftime("%Y-%m-%d")
+    return value.strftime("%m-%d")
 
 
 def _format_recurrences(recurrences: list[Recurrence]) -> str:
@@ -138,11 +163,11 @@ def _format_recurrences(recurrences: list[Recurrence]) -> str:
     if not active:
         return "无"
     lines = [
-        "| 序号 | 标题 | 周期 | 模板任务 | 详情 |",
-        "|---:|---|---|---|---|",
+        "| ID | 标题 | 周期 | 模板任务 | 详情 |",
+        "|---|---|---|---|---|",
     ]
-    for index, rec in enumerate(active[:MAX_CONTEXT_RECURRENCES], start=1):
-        lines.append(_format_recurrence_row(index, rec))
+    for rec in active[:MAX_CONTEXT_RECURRENCES]:
+        lines.append(_format_recurrence_row(rec))
     remaining = len(active) - MAX_CONTEXT_RECURRENCES
     if remaining > 0:
         lines.append(f"\n另有 {remaining} 条周期规则未展开")
@@ -150,23 +175,24 @@ def _format_recurrences(recurrences: list[Recurrence]) -> str:
 
 
 def _format_recurrence(rec: Recurrence) -> str:
-    return _format_recurrence_row(None, rec).strip("| ")
+    return _format_recurrence_row(rec).strip("| ")
 
 
-def _format_recurrence_row(index: int | None, rec: Recurrence) -> str:
+def _format_recurrence_row(rec: Recurrence) -> str:
+    time_label = TIME_SLOT_LABELS.get(rec.time_slot, rec.time_of_day)
     cadence: str
     if rec.pattern == RecurrencePattern.DAILY:
-        cadence = f"每日 {rec.time_of_day}"
+        cadence = f"每日 {time_label}"
     elif rec.pattern == RecurrencePattern.WEEKLY:
         days = "/".join(WEEKDAY_NAMES.get(day, str(day)) for day in (rec.week_days or []))
-        cadence = f"每周{days or '?'} {rec.time_of_day}"
+        cadence = f"每周{days or '?'} {time_label}"
     elif rec.pattern == RecurrencePattern.MONTHLY:
-        cadence = f"每月{rec.month_day or '?'}日 {rec.time_of_day}"
+        cadence = f"每月{rec.month_day or '?'}日 {time_label}"
     else:
-        cadence = f"每{rec.interval_days or 1}天 {rec.time_of_day}"
+        cadence = f"每{rec.interval_days or 1}天 {time_label}"
 
     values = [
-        str(index) if index is not None else "",
+        _cell(rec.id),
         _cell(rec.title),
         _cell(cadence),
         _cell(rec.template.title),

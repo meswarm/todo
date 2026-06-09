@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - optional dependency in environments wi
     AsyncOpenAI = None
 
 from src.tool_registry import ToolRegistry
+from src.markdown_media import extract_embedded_media_references
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,11 @@ _IMAGE_TAG_PATTERN = re.compile(r"\[image:(.+?):(.+?)\]")
 _MUTATING_TOOLS = {
     "create_task",
     "update_task",
-    "complete_task",
     "delete_task",
     "create_recurrence",
+    "update_recurrence",
 }
+_DETAIL_MEDIA_TOOLS = {"create_task", "update_task"}
 
 
 def _elapsed_ms(start: float) -> int:
@@ -63,6 +65,7 @@ class LLMEngine:
         self._temperature = temperature
         self._vision_enabled = vision_enabled
         self._histories: dict[str, list[dict[str, Any]]] = {}
+        self._pending_media_references: dict[str, list[str]] = {}
 
     def _history(self, room_id: str) -> list[dict[str, Any]]:
         if room_id not in self._histories:
@@ -134,6 +137,15 @@ class LLMEngine:
                 {"role": "system", "content": json.dumps(context_hook, ensure_ascii=False)},
             )
         user_content = self._build_user_content(user_message)
+        current_media_references = extract_embedded_media_references(user_message)
+        if current_media_references:
+            self._pending_media_references[room_id] = self._dedupe_media_references(
+                [
+                    *self._pending_media_references.get(room_id, []),
+                    *current_media_references,
+                ]
+            )
+        media_references = self._pending_media_references.get(room_id, [])
         messages.append({"role": "user", "content": user_content})
         history.append({"role": "user", "content": user_content})
         executed_mutations: dict[str, Any] = {}
@@ -201,6 +213,8 @@ class LLMEngine:
                 }
             )
 
+            direct_replies: list[str] = []
+            consumed_pending_media = False
             for tool_call in tool_calls:
                 try:
                     args = json.loads(tool_call.function.arguments or "{}")
@@ -208,6 +222,11 @@ class LLMEngine:
                     result = {"error": "tool arguments decode error"}
                 else:
                     try:
+                        self._merge_media_references_into_args(
+                            tool_call.function.name,
+                            args,
+                            media_references,
+                        )
                         mutation_key = self._mutation_key(tool_call.function.name, args)
                         if mutation_key and mutation_key in executed_mutations:
                             tool_start = perf_counter()
@@ -236,6 +255,15 @@ class LLMEngine:
                             )
                             if mutation_key:
                                 executed_mutations[mutation_key] = result
+                            if (
+                                tool_call.function.name in _DETAIL_MEDIA_TOOLS
+                                and media_references
+                                and not (
+                                    isinstance(result, dict)
+                                    and result.get("error")
+                                )
+                            ):
+                                consumed_pending_media = True
                     except Exception as exc:
                         logger.exception("Tool execution failed: %s", tool_call.function.name)
                         result = {
@@ -257,6 +285,23 @@ class LLMEngine:
                         "content": json.dumps(result, ensure_ascii=False, default=str),
                     }
                 )
+                direct_reply = self._direct_reply_from_tool_result(result)
+                if direct_reply is not None:
+                    direct_replies.append(direct_reply)
+            if consumed_pending_media:
+                self._pending_media_references.pop(room_id, None)
+            if direct_replies:
+                direct_reply = "\n\n".join(direct_replies)
+                history.append({"role": "assistant", "content": direct_reply})
+                self._trim_history(room_id)
+                logger.info(
+                    "perf llm_chat_total room=%s rounds=%s elapsed_ms=%s direct_tool_reply=true reply_chars=%s",
+                    room_id,
+                    round_index,
+                    _elapsed_ms(total_start),
+                    len(direct_reply),
+                )
+                return direct_reply
 
         fallback = "本轮对话工具链过长，请分步发起下一条需求。"
         history.append({"role": "assistant", "content": fallback})
@@ -279,6 +324,44 @@ class LLMEngine:
             sort_keys=True,
             default=str,
         )
+
+    def _dedupe_media_references(self, media_references: list[str]) -> list[str]:
+        deduped: list[str] = []
+        for ref in media_references:
+            if ref not in deduped:
+                deduped.append(ref)
+        return deduped
+
+    def _direct_reply_from_tool_result(self, result: Any) -> str | None:
+        if not isinstance(result, dict):
+            return None
+        if result.get("error"):
+            return None
+        message = result.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        task_table = result.get("task_markdown")
+        if isinstance(task_table, str) and task_table.strip():
+            return task_table.strip()
+        table = result.get("current_business_day_tasks_markdown")
+        if isinstance(table, str) and table.strip():
+            return table.strip()
+        return None
+
+    def _merge_media_references_into_args(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        media_references: list[str],
+    ) -> None:
+        if tool_name not in _DETAIL_MEDIA_TOOLS or not media_references:
+            return
+        current = str(args.get("detail") or "").strip()
+        missing = [ref for ref in media_references if ref not in current]
+        if not missing:
+            return
+        media_block = "\n".join(missing)
+        args["detail"] = f"{media_block}\n{current}".strip() if current else media_block
 
     async def _create_completion(self, payload: dict[str, Any]) -> Any:
         if hasattr(self._client, "chat") and hasattr(self._client.chat, "completions"):

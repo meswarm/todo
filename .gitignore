@@ -30,12 +30,14 @@ service-account*.json
 tmp/
 .tmp/
 .cache/
+/tmp.md
 
 # === Python ===
 __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv*/
 venv/
 env/
 .python-version
@@ -54,7 +56,7 @@ htmlcov/
 data/
 db/
 downloads/
-.codex
+.codex/
 
 # === Local media cache (e.g. Link / R2 downloads); do not publish ===
 media_cache/

@@ -11,6 +11,7 @@ class FakeMatrixAPI:
     def __init__(self, responses):
         self._responses = list(responses)
         self.typing_calls = []
+        self.sent = []
 
     async def sync(self, timeout=30000, since=None):
         if not self._responses:
@@ -25,6 +26,10 @@ class FakeMatrixAPI:
 
     async def room_typing(self, room_id, typing_state, timeout=None):
         self.typing_calls.append((room_id, typing_state, timeout))
+        return None
+
+    async def room_send(self, room_id, message_type, content):
+        self.sent.append((room_id, message_type, content))
         return None
 
 
@@ -78,6 +83,41 @@ def test_start_sync_skips_initial_historical_timeline(tmp_path):
     asyncio.run(matrix.start_sync())
 
     assert [item[2] for item in received] == ["新消息"]
+
+
+def test_send_text_can_add_notification_metadata(tmp_path):
+    room_id = "!room:example"
+    api = FakeMatrixAPI([])
+    matrix = MatrixClient(
+        MatrixConfig(
+            homeserver="https://matrix.example",
+            user="@bot:example",
+            password="secret",
+            rooms=[room_id],
+        ),
+        downloads_dir=tmp_path,
+    )
+    matrix._client = api
+
+    asyncio.run(
+        matrix.send_text(
+            room_id,
+            "## 提醒\n\n| ID | 标题 |",
+            content_extra={"com.talk.kind": "notification"},
+        )
+    )
+
+    assert api.sent == [
+        (
+            room_id,
+            "m.room.message",
+            {
+                "msgtype": "m.text",
+                "body": "## 提醒\n\n| ID | 标题 |",
+                "com.talk.kind": "notification",
+            },
+        )
+    ]
 
 
 def test_start_sync_deduplicates_repeated_event_ids(tmp_path):

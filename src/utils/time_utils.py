@@ -1,4 +1,6 @@
 """时间工具"""
+from __future__ import annotations
+
 from datetime import datetime, date, timedelta
 
 

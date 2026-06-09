@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -50,6 +51,15 @@ def _int_list_env(name: str, default: str) -> list[int]:
             continue
         values.append(int(item))
     return values
+
+
+def _time_env(name: str, default: str) -> time:
+    raw = os.getenv(name, default).strip()
+    parts = raw.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"{name} must use HH:MM format")
+    hour, minute = (int(part) for part in parts)
+    return time(hour=hour, minute=minute)
 
 
 def _resolve_with_base(value: str, base_dir: Path) -> Path:
@@ -115,10 +125,15 @@ class AppConfig:
     media: MediaConfig
     morning_hour: int
     morning_minute: int
+    noon_hour: int
+    noon_minute: int
     evening_hour: int
     evening_minute: int
     task_reminders: list[int]
     reminder_min_lead_seconds: int
+    slot_morning_time: time
+    slot_afternoon_time: time
+    slot_evening_time: time
     context_cell_max_chars: int
 
     @property
@@ -181,12 +196,17 @@ class AppConfig:
                 download_audios=parse_bool(os.getenv("R2_DOWNLOAD_AUDIOS"), True),
                 download_files=parse_bool(os.getenv("R2_DOWNLOAD_FILES"), True),
             ),
-            morning_hour=int(os.getenv("TODO_MORNING_HOUR", "8")),
+            morning_hour=int(os.getenv("TODO_MORNING_HOUR", "7")),
             morning_minute=int(os.getenv("TODO_MORNING_MINUTE", "0")),
-            evening_hour=int(os.getenv("TODO_EVENING_HOUR", "21")),
+            noon_hour=int(os.getenv("TODO_NOON_HOUR", "12")),
+            noon_minute=int(os.getenv("TODO_NOON_MINUTE", "0")),
+            evening_hour=int(os.getenv("TODO_EVENING_HOUR", "23")),
             evening_minute=int(os.getenv("TODO_EVENING_MINUTE", "0")),
             task_reminders=_int_list_env("TODO_REMINDERS", "10,5,2"),
             reminder_min_lead_seconds=int(os.getenv("TODO_REMINDER_MIN_LEAD_SECONDS", "30")),
+            slot_morning_time=_time_env("TODO_SLOT_MORNING_TIME", "08:00"),
+            slot_afternoon_time=_time_env("TODO_SLOT_AFTERNOON_TIME", "14:00"),
+            slot_evening_time=_time_env("TODO_SLOT_EVENING_TIME", "18:00"),
             context_cell_max_chars=int(os.getenv("TODO_CONTEXT_CELL_MAX_CHARS", "300")),
         )
 
@@ -200,10 +220,17 @@ RECURRENCES_FILE = DATA_DIR / "recurrences.json"
 REMINDER_STATE_FILE = DATA_DIR / "reminder_state.json"
 MORNING_PUSH_HOUR = APP_CONFIG.morning_hour
 MORNING_PUSH_MINUTE = APP_CONFIG.morning_minute
+NOON_PUSH_HOUR = APP_CONFIG.noon_hour
+NOON_PUSH_MINUTE = APP_CONFIG.noon_minute
 EVENING_PUSH_HOUR = APP_CONFIG.evening_hour
 EVENING_PUSH_MINUTE = APP_CONFIG.evening_minute
 TASK_REMINDER_MINUTES = APP_CONFIG.task_reminders
 REMINDER_MIN_LEAD_SECONDS = APP_CONFIG.reminder_min_lead_seconds
+SLOT_REMINDER_TIMES = {
+    "morning": APP_CONFIG.slot_morning_time,
+    "afternoon": APP_CONFIG.slot_afternoon_time,
+    "evening": APP_CONFIG.slot_evening_time,
+}
 CONTEXT_CELL_MAX_CHARS = APP_CONFIG.context_cell_max_chars
 
 

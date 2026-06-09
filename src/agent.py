@@ -6,18 +6,24 @@ import json
 import logging
 import mimetypes
 from time import perf_counter
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from src.config import AppConfig
-from src.context import build_runtime_context, render_prompt_template
+from src.context import _format_recurrences, _format_tasks, build_runtime_context, format_task_time_label, render_prompt_template
 from src.markdown_media import parse_embedded_media
 from src.llm_engine import LLMEngine
 from src.matrix_client import MatrixAttachment, MatrixClient
 from src.media_store import R2MediaStore
+from src.models import Task
 from src.services.notification import get_notification_sink
+from src.services import task_service
+from src.services.agenda_service import sort_tasks_for_agenda
+from src.services.business_day import business_date
 from src.skills import build_prompt_with_skills, load_skills_from_dir, load_system_prompt
+from src.scheduler.recurrence_gen import skip_recurrence_occurrence
 from src.tool_registry import ToolRegistry
+import src.tools.todo_tools as todo_tools
 from src.tools.todo_tools import build_todo_tools
 
 logger = logging.getLogger(__name__)
@@ -125,6 +131,11 @@ class TodoAgent:
             logger.debug("Ignore message from unconfigured room: %s", room_id)
             return
 
+        shortcut_reply = self._shortcut_list_reply(text, attachments)
+        if shortcut_reply is not None:
+            await self._matrix.send_text(room_id, shortcut_reply)
+            return
+
         total_start = perf_counter()
         prompt = ""
         try:
@@ -198,7 +209,11 @@ class TodoAgent:
                 for payload in payloads:
                     message = self._format_notification(payload)
                     for room in self._rooms:
-                        await self._matrix.send_text(room, message)
+                        await self._matrix.send_text(
+                            room,
+                            message,
+                            content_extra={"com.talk.kind": "notification"},
+                        )
             await asyncio.sleep(2)
 
     async def _compose_prompt(
@@ -257,6 +272,135 @@ class TodoAgent:
 
         return "\n".join(part for part in parts if part).strip()
 
+    def _shortcut_list_reply(
+        self,
+        text: str,
+        attachments: list[MatrixAttachment],
+    ) -> str | None:
+        if attachments:
+            return None
+
+        command = (text or "").strip().lower()
+        if command == "list today":
+            return self._format_shortcut_task_section(
+                "今日任务",
+                self._agenda_tasks(todo_tools.business_date()),
+            )
+        if command == "list next":
+            return self._format_next_tasks()
+        history_reply = self._shortcut_history_reply(command)
+        if history_reply is not None:
+            return history_reply
+        if command.startswith("delete "):
+            target_id = command.removeprefix("delete ").strip()
+            if not target_id or " " in target_id:
+                return None
+            return self._delete_by_shortcut(target_id)
+        if command.startswith("complete "):
+            target_id = command.removeprefix("complete ").strip()
+            if not target_id or " " in target_id:
+                return None
+            return self._complete_by_shortcut(target_id)
+        return None
+
+    def _delete_by_shortcut(self, target_id: str) -> str:
+        if target_id.startswith("rec_"):
+            deleted = todo_tools.delete_recurrence(target_id)
+            return (
+                f"已删除周期任务规则 `{target_id}`"
+                if deleted
+                else f"未找到周期任务规则 `{target_id}`"
+            )
+
+        task = task_service.get_task(target_id)
+        deleted = task_service.delete_task(target_id)
+        if deleted and task and task.recurrence_id:
+            skip_recurrence_occurrence(task.recurrence_id, business_date(task.scheduled_at))
+        return (
+            f"已删除任务 `{target_id}`"
+            if deleted
+            else f"未找到任务 `{target_id}`"
+        )
+
+    def _complete_by_shortcut(self, task_id: str) -> str:
+        task = task_service.complete_task(task_id)
+        status = (
+            f"已完成任务 `{task_id}`"
+            if task
+            else f"未找到任务 `{task_id}`"
+        )
+        return "\n\n".join(
+            [
+                status,
+                self._format_shortcut_task_section(
+                    "今日任务",
+                    self._agenda_tasks(todo_tools.business_date()),
+                ),
+            ]
+        )
+
+    def _format_next_tasks(self) -> str:
+        today = todo_tools.business_date()
+        tomorrow = today + timedelta(days=1)
+        future_start = today + timedelta(days=2)
+        future_tasks = sort_tasks_for_agenda(
+            [
+                task
+                for task in task_service.task_store.load_all()
+                if task.recurrence_id is None
+                and business_date(task.scheduled_at) >= future_start
+            ]
+        )
+        sections = [
+            self._format_shortcut_task_section(
+                "明日任务",
+                self._agenda_tasks(tomorrow),
+            ),
+            self._format_shortcut_task_section("未来任务", future_tasks),
+            "## 周期任务规则\n" + _format_recurrences(todo_tools.list_recurrences()),
+        ]
+        return "\n\n".join(sections)
+
+    def _shortcut_history_reply(self, command: str) -> str | None:
+        parts = command.split()
+        if len(parts) != 3 or parts[:2] != ["list", "history"]:
+            return None
+        try:
+            days = int(parts[2])
+        except ValueError:
+            return None
+        if days <= 0:
+            return None
+        return self._format_history_tasks(days)
+
+    def _format_history_tasks(self, days: int) -> str:
+        today = todo_tools.business_date()
+        history_tasks = task_service.history_store.load_all()
+        sections: list[str] = []
+        for offset in range(1, days + 1):
+            day = today - timedelta(days=offset)
+            tasks = sort_tasks_for_agenda(
+                [
+                    task
+                    for task in history_tasks
+                    if business_date(task.scheduled_at) == day
+                ]
+            )
+            sections.append(
+                self._format_shortcut_task_section(
+                    f"历史任务 {day.isoformat()}",
+                    tasks,
+                )
+            )
+        return "\n\n".join(sections)
+
+    def _agenda_tasks(self, day: date) -> list[Task]:
+        payload = todo_tools.build_day_agenda(day)
+        return [Task.model_validate(item) for item in payload["tasks"]]
+
+    def _format_shortcut_task_section(self, title: str, tasks: list[Task]) -> str:
+        return f"## {title}\n{_format_tasks(tasks)}"
+
 
     def _format_notification(self, payload: dict[str, Any]) -> str:
         p_type = payload.get("type", "notification")
@@ -264,9 +408,17 @@ class TodoAgent:
         data = payload.get("data", {})
         if p_type == "morning_agenda":
             today_tasks = data.get("today_tasks", [])
-            future_tasks = data.get("future_tasks", [])
+            return self._format_agenda_notification("今日任务", today_tasks)
+        if p_type == "noon_agenda":
+            today_tasks = data.get("today_tasks", [])
+            return self._format_agenda_notification("今日任务", today_tasks)
+        if p_type == "evening_agenda":
+            tomorrow_tasks = data.get("tomorrow_tasks", [])
+            return self._format_agenda_notification("明日任务", tomorrow_tasks)
+        if p_type == "evening_review":
+            today_tasks = data.get("today_tasks", [])
             lines = [
-                "【早晨推送】",
+                "【晚间复盘】",
                 f"业务日: {data.get('business_day', '')}",
                 f"时间: {timestamp}",
                 f"今日任务: {len(today_tasks)}",
@@ -274,46 +426,49 @@ class TodoAgent:
             if today_tasks:
                 lines.append("今日任务：")
                 lines.append(self._format_notification_task_table(today_tasks[:8]))
-            if future_tasks:
-                lines.append("未来任务：")
-                lines.append(self._format_notification_task_table(future_tasks[:8]))
-            return "\n".join(lines)
-        if p_type == "evening_review":
-            completed = data.get("completed_tasks", [])
-            incomplete = data.get("incomplete_tasks", [])
-            lines = [
-                "【晚间复盘】",
-                f"业务日: {data.get('business_day', '')}",
-                f"时间: {timestamp}",
-                f"完成: {len(completed)}",
-                f"未完成: {len(incomplete)}",
-            ]
-            if completed:
-                lines.append("已完成：")
-                lines.append(self._format_notification_task_table(completed[:6]))
-            if incomplete:
-                lines.append("未完成：")
-                lines.append(self._format_notification_task_table(incomplete[:6]))
             return "\n".join(lines)
         if p_type == "task_reminder":
             task = data.get("task", {})
             return self._format_task_reminder(task)
+        if p_type == "slot_task_reminder":
+            return self._format_slot_task_reminder(data)
         return f"{p_type}\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+
+    def _format_agenda_notification(self, title: str, tasks: Any) -> str:
+        task_list = tasks if isinstance(tasks, list) else []
+        body = self._format_notification_task_table(task_list[:8]) if task_list else "无"
+        return f"## {title}\n{body}"
 
     def _format_task_reminder(self, task: dict[str, Any]) -> str:
         minutes_before = task.get("minutes_before", "?")
         return "\n".join(
             [
-                f"🔔 提前 {minutes_before} 分钟提醒",
+                f"## 🔔 提前 {minutes_before} 分钟提醒",
                 "",
                 self._format_notification_task_table([task]),
             ]
         )
 
+    def _format_slot_task_reminder(self, data: dict[str, Any]) -> str:
+        labels = {
+            "morning": "上午",
+            "afternoon": "下午",
+            "evening": "晚上",
+        }
+        slot = str(data.get("time_slot", ""))
+        title = f"## {labels.get(slot, slot or '时段')}任务提醒"
+        tasks = data.get("tasks", [])
+        return "\n\n".join(
+            [
+                title,
+                self._format_notification_task_table(tasks if isinstance(tasks, list) else []),
+            ]
+        )
+
     def _format_notification_task_table(self, tasks: list[dict[str, Any]]) -> str:
         lines = [
-            "| ID | 标题 | 开始时间 | 详情 | 完成总结 |",
-            "|---|---|---|---|---|",
+            "| ID | 标题 | 开始时间 | 详情 |",
+            "|---|---|---|---|",
         ]
         for task in tasks:
             lines.append(
@@ -322,14 +477,29 @@ class TodoAgent:
                     [
                         self._notification_cell(task.get("id", "")),
                         self._notification_cell(task.get("title", "未命名")),
-                        self._notification_time(task.get("scheduled_at")),
+                        self._notification_task_time(task),
                         self._notification_cell(task.get("detail", "")),
-                        self._notification_cell(task.get("completion_summary", "")),
                     ]
                 )
                 + " |"
             )
         return "\n".join(lines)
+
+    def _notification_task_time(self, task: dict[str, Any]) -> str:
+        value = task.get("scheduled_at")
+        if task.get("completed"):
+            return "✅"
+        if not value:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return str(value)
+        return format_task_time_label(
+            parsed,
+            task.get("time_kind"),
+            task.get("time_slot"),
+        )
 
     def _notification_time(self, value: Any, *, time_only: bool = False) -> str:
         if not value:

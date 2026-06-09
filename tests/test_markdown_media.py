@@ -1,4 +1,8 @@
-from src.markdown_media import EmbeddedMedia, parse_embedded_media
+from src.markdown_media import (
+    EmbeddedMedia,
+    extract_embedded_media_references,
+    parse_embedded_media,
+)
 
 
 def test_parse_embedded_media_parses_images():
@@ -74,3 +78,19 @@ def test_parse_embedded_media_defaults_unknown_extension_to_file():
 
     assert len(parsed) == 1
     assert parsed[0].kind == "file"
+
+
+def test_extract_embedded_media_references_preserves_original_markdown():
+    text = (
+        "请处理 ![猫](r2://bucket/imgs/cat.png) "
+        "参考 [录音](r2://bucket/audios/note.mp3) "
+        "以及 r2://bucket/files/report.pdf."
+    )
+
+    refs = extract_embedded_media_references(text)
+
+    assert refs == [
+        "![猫](r2://bucket/imgs/cat.png)",
+        "[录音](r2://bucket/audios/note.mp3)",
+        "r2://bucket/files/report.pdf",
+    ]

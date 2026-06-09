@@ -12,9 +12,12 @@ from src.config import (
     EVENING_PUSH_MINUTE,
     MORNING_PUSH_HOUR,
     MORNING_PUSH_MINUTE,
+    NOON_PUSH_HOUR,
+    NOON_PUSH_MINUTE,
 )
 from src.scheduler.evening_push import evening_push
 from src.scheduler.morning_push import morning_push
+from src.scheduler.noon_push import noon_push
 from src.scheduler.recurrence_gen import prepare_business_day
 from src.scheduler.reminder_scan import has_imminent_tasks, scan_reminders
 
@@ -36,7 +39,7 @@ def _adaptive_reminder_scan() -> None:
     else:
         job = scheduler.get_job("fast_reminder_scan")
         if job:
-            scheduler.remove_job("critical_fast_scan")
+            scheduler.remove_job("fast_reminder_scan")
             logger.info("Deactivated fast reminder scan")
 
 
@@ -56,6 +59,12 @@ def start_scheduler() -> None:
         morning_push,
         CronTrigger(hour=MORNING_PUSH_HOUR, minute=MORNING_PUSH_MINUTE),
         id="morning_push",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        noon_push,
+        CronTrigger(hour=NOON_PUSH_HOUR, minute=NOON_PUSH_MINUTE),
+        id="noon_push",
         replace_existing=True,
     )
     scheduler.add_job(

@@ -1,10 +1,10 @@
 """Task service for the simplified task model."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 from src.config import HISTORY_FILE, TASKS_FILE
-from src.models import Task, TaskComplete, TaskCreate, TaskUpdate
+from src.models import Task, TaskCreate, TaskUpdate
 from src.storage import JsonStore
 from src.utils.id_gen import generate_task_id
 
@@ -29,31 +29,6 @@ def get_task(task_id: str) -> Task | None:
     return history_store.find_by_id(task_id)
 
 
-def list_tasks(
-    start: date | datetime | None = None,
-    end: date | datetime | None = None,
-    include_recurring: bool = True,
-) -> list[Task]:
-    tasks = task_store.load_all()
-    if start:
-        start_dt = (
-            datetime.combine(start, datetime.min.time())
-            if isinstance(start, date) and not isinstance(start, datetime)
-            else start
-        )
-        tasks = [task for task in tasks if task.scheduled_at >= start_dt]
-    if end:
-        end_dt = (
-            datetime.combine(end, datetime.max.time())
-            if isinstance(end, date) and not isinstance(end, datetime)
-            else end
-        )
-        tasks = [task for task in tasks if task.scheduled_at <= end_dt]
-    if not include_recurring:
-        tasks = [task for task in tasks if task.recurrence_id is None]
-    return sorted(tasks, key=lambda task: task.scheduled_at)
-
-
 def update_task(task_id: str, data: TaskUpdate) -> Task | None:
     task = task_store.find_by_id(task_id)
     if not task:
@@ -65,19 +40,17 @@ def update_task(task_id: str, data: TaskUpdate) -> Task | None:
     return task
 
 
-def complete_task(task_id: str, data: TaskComplete) -> Task | None:
+def delete_task(task_id: str) -> bool:
+    return task_store.delete(task_id)
+
+
+def complete_task(task_id: str) -> Task | None:
     task = task_store.find_by_id(task_id)
     if not task:
         return None
-
-    task.completed_at = data.completed_at or datetime.now()
-    task.completion_summary = data.completion_summary
+    task.completed = True
     task_store.update(task_id, task)
     return task
-
-
-def delete_task(task_id: str) -> bool:
-    return task_store.delete(task_id)
 
 
 def archive_before(cutoff: datetime) -> int:
